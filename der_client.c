@@ -11,7 +11,7 @@
 #include "hash.c"
 #include "resource.c"
 #include "retrieve.c"
-// #include "subscribe.c"
+#include "subscribe.c"
 #include "schedule.c"
 #include "der.c"
 #include "metering.c"
@@ -25,7 +25,7 @@ void print_event_start (EventBlock *eb) { Resource *r = eb->event;
   DerDevice *device = eb->context;
   SE_Event_t *ev = r->data; SE_DERControl_t *derc;
   printf ("Event Start \"%s\" -- %s", ev->description, timestamp ());
-  printf ("EndDevice: %ld\n", device->sfdi);
+  printf ("EndDevice: %" PRId64 "\n", device->sfdi);
   switch (r->type) {
   case SE_DERControl: derc = r->data;
     print_se_object (&derc->DERControlBase, SE_DERControlBase);
@@ -35,13 +35,14 @@ void print_event_start (EventBlock *eb) { Resource *r = eb->event;
 void print_event_end (EventBlock *eb) { Resource *r = eb->event;
   DerDevice *device = eb->context; SE_Event_t *ev = r->data;
   printf ("Event End \"%s\" -- %s", ev->description, timestamp ());
-  printf ("EndDevice: %ld\n\n", device->sfdi);
+  printf ("EndDevice: %" PRId64 "\n\n", device->sfdi);
 }
 
-void print_default_control (DerDevice *device) {
-  SE_DefaultDERControl_t *dc = device->dderc;
+void print_default_control (DefaultControl *d) {
+  SE_DefaultDERControl_t *dc = d->dderc;
+  DerDevice *device = d->context;
   printf ("Default Control \"%s\" -- %s", dc->description, timestamp ());
-  printf ("EndDevice: %ld\n", device->sfdi);
+  printf ("EndDevice: %" PRId64 "\n", device->sfdi);
   print_se_object (dc, SE_DefaultDERControl);
   printf ("\n");
 }
@@ -49,14 +50,15 @@ void print_default_control (DerDevice *device) {
 void print_blocks (EventBlock *eb) {
   while (eb) {
     SE_Event_t *ev = resource_data (eb->event);
-    printf ("  %-11ld %-11ld %-31s\n", eb->start, eb->end, ev->description);
+    printf ("  %-11" PRId64 " %-11" PRId64 " %-31s\n",
+	    eb->start, eb->end, ev->description);
     eb = eb->next;
   }
 }
 
 void print_event_schedule (DerDevice *d) {
   Schedule *s = &d->schedule; EventBlock *eb = s->scheduled;
-  printf ("Event Schedule for device %ld -- %s", d->sfdi, timestamp ());
+  printf ("Event Schedule for device %" PRId64 " -- %s", d->sfdi, timestamp ());
   printf ("  Start       End         Description\n");
   print_blocks (s->scheduled);
   printf ("Active Blocks:\n");
@@ -67,10 +69,8 @@ int der_poll (void **any, int timeout) {
   Schedule *s; int event;
   while (event = next_event (any)) {
     switch (event) {
-    case SCHEDULE_UPDATE: s = *any; update_schedule (s);
-      if (!s->active) { DerDevice *d = s->context;
-	if (d->dderc) insert_event (d, DEFAULT_CONTROL, 0);
-      } break;
+    case SCHEDULE_UPDATE: s = *any;
+      update_schedule (s); update_defaults (s); break;
     case RESOURCE_POLL: poll_resource (*any);
     case RESOURCE_UPDATE: update_resource (*any); break;
     case RESOURCE_REMOVE:

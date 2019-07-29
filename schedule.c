@@ -1,6 +1,8 @@
 // Copyright (c) 2018 Electric Power Research Institute, Inc.
 // author: Mark Slicker <mark.slicker@gmail.com>
 
+extern int dut_strategy;
+
 /** @defgroup schedule Schedule
 
     The schedule module provides methods for IEEE 2030.5 event scheduling.
@@ -9,7 +11,7 @@
 
     The events of each function set are independent and each EndDevice may
     utilitize one or more function sets, therefore an EndDevice could have one
-    or more independent event schedules. 
+    or more independent event schedules.
     @{
 */
 
@@ -40,7 +42,7 @@ typedef struct _EventBlock {
 
 /** @brief A Schedule organizes the events of a particular function set for an
     EndDevice in terms of the rules in section 12.1.3 Event Rules and Guidlines.
-    
+
     Events are assigned to an EventBlock which can belong to one of three
     queues, `scheduled`, `active`, and `superseded`. EventBlocks that
     correspond with server events that have been marked Canceled or Superseded
@@ -140,9 +142,31 @@ int randomize_duration (void *event) {
 }
 
 void device_response (Stub *device, Stub *event, int status) {
+  // (TS) : DUT bad behavior
+  enum DUTStrategy {
+    DEFAULT, SKIP_RECEIVE, SKIP_START, SKIP_COMPLETE, SKIP_CANCEL, SKIP_SUPERSED
+  };
+
+  if (status == EventReceived && dut_strategy == SKIP_RECEIVE) {
+    return;
+  } else if (status == EventStarted && dut_strategy == SKIP_START) {
+    return;
+  } else if (status == EventCompleted && dut_strategy == SKIP_COMPLETE) {
+    return;
+  } else if (status == EventCanceled && dut_strategy == SKIP_CANCEL) {
+    return;
+  } else if (status == EventSuperseded && dut_strategy == SKIP_SUPERSED) {
+    return;
+  }
+
   SE_EndDevice_t *edev = resource_data (device);
   SE_Event_t *ev = resource_data (event);
   SE_DERControlResponse_t resp;
+
+  printf("Stub Time: %ld\n", event->start);
+  printf("Event Time: %ld\n", ev->start);
+  printf("Response Time: %ld\n", resp.start);
+
   if ((status == EventReceived && ev->responseRequired & 1)
       || (ev->responseRequired & 2)) {
     se_response (&resp, ev, edev->lFDI, status);
@@ -243,7 +267,7 @@ void activate_block (Schedule *s, EventBlock *eb) {
     device_response (s->device, event, EventStarted);
   }
   event->poll_rate = active_poll_rate;
-  poll_resource (event);  
+  poll_resource (event);
 }
 
 void insert_active (Schedule *s, EventBlock *eb) {
@@ -265,11 +289,13 @@ void insert_active (Schedule *s, EventBlock *eb) {
     } a = next;
   }
   switch (event_status (eb->event)) {
-  case Scheduled: update_resource (eb->event);
+  case Scheduled:
+    if (!is_subscribed (eb->event))
+      update_resource (eb->event);
     eb->status = ActiveWait; break;
   case Active: activate_block (s, eb); break;
   }
-  s->active = insert_sorted (s->active, eb, compare_end); 
+  s->active = insert_sorted (s->active, eb, compare_end);
 }
 
 EventBlock *get_block (Schedule *s, void *event) {
@@ -278,7 +304,7 @@ EventBlock *get_block (Schedule *s, void *event) {
 }
 
 void activate_blocks (Stub *event) { List *l;
-  // printf ("activate_blocks\n");
+  printf ("activate_blocks:\n");
   foreach (l, event->schedules) {
     EventBlock *eb = get_block (l->data, event);
     if (eb->status == ActiveWait)
@@ -297,7 +323,7 @@ void remove_block (Schedule *s, EventBlock *eb) {
     s->active = list_remove (s->active, eb); break;
   case ScheduleSuperseded:
     s->superseded = list_remove (s->superseded, eb); break;
-  }  
+  }
 }
 
 void remove_blocks (Stub *event, int response) { List *l;

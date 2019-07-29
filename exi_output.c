@@ -67,7 +67,7 @@ int exi_output_literal (Output *o, char *s) {
   } return 1;
 }
 
-int exi_output_string (Output *o, const SchemaElement *se, char *s) {
+int exi_output_string (Output *o, const SchemaEntry *se, char *s) {
   const char *name = se_name (se, o->schema);
   StringTable *t = find_table (o->local, name); int i, part, bits;
   if (t) {
@@ -88,7 +88,7 @@ int exi_output_string (Output *o, const SchemaElement *se, char *s) {
 }
 
 int exi_output_value (Output *o, void *value) {
-  int type = o->se->xs_type;
+  int type = o->se->type ^ ST_SIMPLE;
   int n = type >> 4;
   if (o->end - o->ptr < 10) return 0;
   switch (type & 0xf) {
@@ -108,7 +108,7 @@ int exi_output_value (Output *o, void *value) {
 }
 
 int exi_output_simple (Output *o, void *value) {
-  int type = o->se->xs_type;
+  int type = o->se->type^ST_SIMPLE;
   int n = type >> 4; char *s;
   switch (type & 0xf) {
   case XS_STRING: if (n) { s = value; break; }
@@ -123,12 +123,29 @@ int exi_output_simple (Output *o, void *value) {
   return 1;
 }
 
-int exi_output_event (Output *o, const SchemaElement *se, int type) {
-  if (o->end - o->ptr >= 3) {
-    int bits = bit_count (o->n);
+int exi_output_event (Output *o, const SchemaEntry *se, int type) {
+  if (o->end - o->ptr >= 3) { int bits;
     if (type == EE_EVENT && !o->n) bits = 1;
+    else bits = bit_count (o->n);
+    printf ("exi_output_event %d %d\n", o->code, bits);
     output_bits (o, o->code, bits);
     o->n = o->code = 0;
+    return 1;
+  } return 0;
+}
+
+int exi_output_xsi_type (Output *o) {
+  int n = bit_count (o->n),
+    bits = bit_count (o->schema->count),
+    bytes = (n + 3 + 3 + 8 + bits) >> 3;
+  if (o->end - o->ptr > bytes) {
+    int id = o->schema->ids[o->st->type - o->schema->length];
+    printf ("exi_output_xsi_type:  %d %d\n", o->n, n);
+    output_bits (o, o->n, n); // second level code
+    output_bits (o, 0, 3); // xsi:type
+    output_bits (o, 5, 3); // URI - targetNamespace
+    output_byte (o, 0); // local name - compact identifier
+    output_bits (o, id, bits); // local name
     return 1;
   } return 0;
 }
@@ -147,6 +164,7 @@ void exi_output_done (Output *o) {
 
 const OutputDriver exi_output = {
   exi_output_event,
+  exi_output_xsi_type,
   exi_output_value,
   exi_output_simple,
   exi_output_done
@@ -155,6 +173,7 @@ const OutputDriver exi_output = {
 void exi_output_init (Output *o, const Schema *schema, char *buffer, int size) {
   output_init (o, schema, buffer, size);
   o->driver = &exi_output;
+  o->limit = INT_MAX;
   exi_output_header (o);
   o->global = new_string_table (NULL, NULL, 32);
 }

@@ -20,11 +20,15 @@ typedef struct _Address {
 
 #define address_eq(x, y) (memcmp (x, y, sizeof (Address)) == 0)
 #define address_copy(x, y) memcpy (x, y, sizeof (Address))
-#define set_port(addr, p) (addr)->port = htons (p)
-#define address_port(addr) ntohs ((addr)->port)
-#define address_ipv6(addr) (addr)->in6.sin6_addr.s6_addr
-#define address_ipv4(addr) ntohl ((addr)->in.sin_addr.s_addr)
-#define address_type(addr) (addr)->family
+#define set_port(addr, p) ((Address *)addr)->port = htons (p)
+#define address_port(addr) ntohs (((Address *)addr)->port)
+#define address_ipv6(addr) ((Address *)addr)->in6.sin6_addr.s6_addr
+#define address_ipv4(addr) ntohl (((Address *)addr)->in.sin_addr.s_addr)
+#define address_type(addr) ((Address *)addr)->family
+#define ipv6_eq(x, y) (memcmp (((Address *)x)->in6.sin6_addr.s6_addr,	\
+			       ((Address *)y)->in6.sin6_addr.s6_addr, 16) == 0)
+#define ipv4_eq(x, y) (((Address *)x)->in.sin_addr.s_addr ==		\
+		       ((Address *)y)->in.sin_addr.s_addr)
 
 #ifndef HEADER_ONLY
 

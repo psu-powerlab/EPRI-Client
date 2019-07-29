@@ -169,7 +169,8 @@ void load_cert_dir (const char *path) {
 int _tls_initialized = 0;
 
 void tls_init (const char *path, VerifyFunc verify) {
-  int ret, type; char *private = strdup (path), *ext;
+  int ret, type, curves[] = {NID_X9_62_prime256v1};
+  char *private = strdup (path), *ext;
   if ((ssl_ctx = SSL_CTX_new (TLS_method ())) == NULL) {
     print_ssl_error ("tls_init"); exit (0);
   }
@@ -180,6 +181,8 @@ void tls_init (const char *path, VerifyFunc verify) {
     printf ("tls_init: error selecting %s cipher list\n", CIPHER_LIST);
     exit (0);
   }
+  SSL_CTX_set_options (ssl_ctx, SSL_OP_CIPHER_SERVER_PREFERENCE);
+  SSL_CTX_set1_curves (ssl_ctx, curves, 1);
   if (ext = strstr (private, ".x509")) {
     strcpy (ext, ".pem"); type = SSL_FILETYPE_ASN1;
   } else type = SSL_FILETYPE_PEM;

@@ -47,7 +47,7 @@ enum SeMediaType {SE_EXI, SE_XML, APPLICATION_XML};
     @param href is a URI string, the location to send the object to
     @param method is the HTTP method to use, either HTTP_POST or HTTP_PUT
 */
-void *se_send (void *conn, void *obj, int type, char *href, int method);
+void *se_send (void *conn, void *obj, int type, const char *href, int method);
 
 /** @brief Initialize a Response to an Event.
 
@@ -65,6 +65,8 @@ void se_response (void *resp, SE_Event_t *ev, char *lfdi, int status);
     certificate. Use this function to  
 */
 uint64_t *se_sfdi (void *conn);
+
+uint8_t *se_lfdi (void *conn);
 
 /** @brief Return the negotiated content type.
     @param conn is pointer to an SeConnection
@@ -132,7 +134,8 @@ void *se_connect_uri (Uri *uri);
 */
 void *se_accept (Acceptor *a, int secure);
 
-void *find_conn (Address *addr);
+//void *find_conn (Address *addr);
+void *find_conn (int (*match) (void *, void *), void *ctx);
 void *get_conn (Address *addr);
 
 /** @} */
@@ -144,6 +147,7 @@ typedef struct _SeConnection {
   Address host;
   Parser parser;
   int state, media;
+  uint8_t lfdi[20];
   uint64_t sfdi;
   struct _SeConnection *next;
 } SeConnection;
@@ -194,6 +198,10 @@ int se_parse_init (void *conn) {
 
 uint64_t *se_sfdi (void *conn) {
   SeConnection *s = conn; return &s->sfdi;
+}
+
+uint8_t *se_lfdi (void *conn) {
+  SeConnection *s = conn; return s->lfdi;
 }
 
 void free_se_body (void *conn) {
@@ -273,15 +281,16 @@ void *new_conn (int client) {
   return c;
 }
 
-void *find_conn (Address *addr) { SeConnection *c;
-  foreach (c, connections)
-    if (http_client (c) && address_eq (&c->host, addr)) return c;
-  return NULL;
+void *find_conn (int (*match) (void *, void *), void *ctx)  {
+  SeConnection *c = connections;
+  while (c) { if (match (c, ctx)) return c; c = c->next;
+  } return NULL;
 }
 
-void *get_conn (Address *addr) {
-  SeConnection *c = find_conn (addr);
-  return c? c : new_conn (1);
+void *get_conn (Address *addr) { SeConnection *c;
+  foreach (c, connections)
+    if (http_client (c) && address_eq (&c->host, addr)) return c;
+  return new_conn (1);
 }
 
 void *se_connect (Address *addr, int secure) {
@@ -302,7 +311,7 @@ void *se_accept (Acceptor *a, int secure) {
 }
 
 void *se_send (void *conn, void *data, int type,
-	       char *href, int method) {
+	       const char *href, int method) {
   Uri128 buf; Uri *uri = &buf.uri;
   http_parse_uri (&buf, conn, href, 127);
   if (uri->host) conn = se_connect_uri (uri);

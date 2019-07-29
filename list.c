@@ -78,7 +78,7 @@ List *list_delete (List *list, void *data);
     @param lb is a pointer to a linked List.
     @returns the difference beteween lists, la - lb
 */
-List *list_subtract (List *la, List *lb);
+void *list_subtract (void *la, void *lb);
 
 /** @brief Remove a List item from a List.
 
@@ -143,8 +143,9 @@ List *list_delete (List *l, void *data) { List *d, *prev;
   } return l;
 }
 
-List *list_subtract (List *la, List *lb) { List *b;
-  foreach (b, lb) la = list_delete (la, b->data);
+void *list_subtract (void *a, void *b) {
+  List *la = a, *lb = b, *x;
+  foreach (x, lb) la = list_delete (la, x->data);
   return la;
 }
 

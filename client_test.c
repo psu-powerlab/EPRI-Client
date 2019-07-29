@@ -17,7 +17,7 @@ void version () {
 void usage () {
   printf ("usage: client_test interface [device_cert ca_certs..]\n"
 	  "                   <subtype[:1][/path] | URI> [commands] \n\n");
-  print_interfaces (1); exit (0);
+  print_interfaces (0); exit (0);
 }
 
 #define GET_EDEV 1
@@ -33,15 +33,18 @@ void usage () {
 #define INCLUDE_READINGS (1<<9)
 #define ALARM_TEST (1<<10)
 #define DEVICE_TEST (1<<11)
-#define FSA_SUBSCRIBE (1<<12)
+#define SUBSCRIBE_TEST (1<<12)
 #define PUT_SETTINGS (1<<13)
 #define PUT_PIN (1<<14)
 #define DELETE_DEVICE (1<<15)
 #define CLIENT_FOUND (1<<16)
 #define INVERTER_CLIENT (1<<17)
 
+int dut_strategy;
+
 int server = 0, test = 0, secure = 0, interval = 5*60, primary = 0, pin = 0;
-Stub *edevs; char *path = NULL; uint64_t delete_sfdi;
+Stub *edevs; char *path = NULL; uint64_t delete_sfdi; int ipv4 = 0;
+SE_EndDevice_t *client_edev = NULL;
 
 int subtype_query (char *arg, char *name) {
   char subtype[12] = {0}; int qu = 0, n;
@@ -68,6 +71,7 @@ int uri_retrieval (char *arg) {
       printf ("error parsing URI %s\n", arg); exit (0);
     } return 0;
   }
+  ipv4 = (address_type (uri->host) == ADDR_IPv4);
   conn = se_connect_uri (uri);
   if (uri->query && !parse_query (&q, uri->query)) {
     printf ("error parsing URI query \"%s\"\n", uri->query); exit (0);
@@ -117,8 +121,8 @@ void options (int argc, char **argv) {
     const char * const commands[] =
       {"sfdi", "edev", "fsa", "register", "pin", "primary", "all", "time",
        "self", "subscribe", "metering", "meter", "alarm", "poll", "load",
-       "device", "delete", "inverter"};
-    switch (string_index (argv[i], commands, 18)) {
+       "device", "delete", "inverter", "DUT"};
+    switch (string_index (argv[i], commands, 19)) {
     case 0: // sfdi
       if (++i == argc || !number64 (&device_sfdi, argv[i])) {
 	printf ("sfdi command expects number argument\n"); exit (0);
@@ -145,7 +149,8 @@ void options (int argc, char **argv) {
     case 8: // self
       test |= GET_SELF; break;
     case 9: // subscribe
-      test |= GET_EDEV | GET_FSA | FSA_SUBSCRIBE; break;
+      subscribe_init (name, ipv4, secure);
+      test |= GET_EDEV | GET_FSA | SUBSCRIBE_TEST; break;
     case 10: // metering
       test |= GET_ALL | REGISTER_TEST | INCLUDE_READINGS | PUT_SETTINGS;
       device_settings (device_sfdi, "settings");
@@ -172,6 +177,22 @@ void options (int argc, char **argv) {
       } test |= GET_EDEV | DELETE_DEVICE; break;
     case 17: // inverter
       test |= INVERTER_CLIENT; break;
+    case 18: // DUT strategy for bad behavior
+      ++i == argc;
+      if (strcmp(argv[i],"skip event received") == 0) {
+        dut_strategy = 1;
+      } else if (strcmp(argv[i],"skip event started") == 0) {
+        dut_strategy = 2;
+      } else if (strcmp(argv[i],"skip event completed") == 0) {
+        dut_strategy = 3;
+      } else if (strcmp(argv[i],"skip event canceled") == 0) {
+        dut_strategy = 4;
+      } else if (strcmp(argv[i],"skip event superseded") == 0) {
+        dut_strategy = 5;
+      } else {
+        dut_strategy = 0;
+      }
+      break;
     default:
       printf ("unknown command \"%s\"\n", argv[i]); exit (0);
     }
@@ -212,10 +233,10 @@ void alarm_dep (Stub *r) {
 }
 
 void put_der_settings (void *conn, Settings *ds, SE_DER_t *der) {
-  link_put (conn, der, ds->dera, DERAvailability);
-  link_put (conn, der, ds->dercap, DERCapability);
-  link_put (conn, der, ds->derg, DERSettings);
-  link_put (conn, der, ds->ders, DERStatus);
+  put_root (conn, der, ds->dera, DERAvailability);
+  put_root (conn, der, ds->dercap, DERCapability);
+  put_root (conn, der, ds->derg, DERSettings);
+  put_root (conn, der, ds->ders, DERStatus);
 }
 
 void edev_complete (Stub *r) { Stub *s, *t;
@@ -229,22 +250,8 @@ void edev_complete (Stub *r) { Stub *s, *t;
       put_der_settings (s->conn, &d->settings, resource_data (t));
     }
   }
-  if (s = get_subordinate (r, SE_FunctionSetAssignmentsList)) {
-    SE_FunctionSetAssignmentsList_t *fsal = resource_data (s);
-    if (test & FSA_SUBSCRIBE) {
-      /*
-      if (se_exists (edev, SubscriptionListLink)
-	  && fsal->subscribable)
-	subscribe (s, edev->SubscriptionListLink.href);
-      */
-    } else {
-      s->poll_rate = se_exists (fsal, pollRate)? fsal->pollRate : 900;
-      poll_resource (s);
-    }
-    if (test & SCHEDULE_TEST) {
-      schedule_der (r);
-      r->completion = schedule_der;
-    }
+  if (test & SCHEDULE_TEST) {
+    schedule_der (r); r->completion = schedule_der;
   }
   if (edev->sFDI == device_sfdi) {
     if (test & METER_TEST) { List *rds = NULL;
@@ -256,7 +263,7 @@ void edev_complete (Stub *r) { Stub *s, *t;
       rds = create_reading (rds, "Power Factor (PF)", 65, 37);
       rds = create_reading (rds, "Voltage (V)", 29, 0);
       rds = create_reading (rds, "Current (A)", 5, 0);
-      rds = create_reading (rds, "Frequency (Hz)", 33, 0);    
+      rds = create_reading (rds, "Frequency (Hz)", 33, 0);
       d->readings = rds;
       if (test & INCLUDE_READINGS)
 	mup.MirrorMeterReading = rds;
@@ -271,40 +278,59 @@ void edev_complete (Stub *r) { Stub *s, *t;
   }
 }
 
+void client_subscribe (Stub *s) {
+  if (se_exists (client_edev, SubscriptionListLink) && !s->subscribed)
+    subscribe (s, client_edev->SubscriptionListLink.href);
+}
+
+void derc_list (Stub *cl) {
+  SE_DERControlList_t *dercl = resource_data (cl);
+  if (test & SUBSCRIBE_TEST && dercl->subscribable)
+    client_subscribe (cl);
+  else {
+    cl->poll_rate = active_poll_rate;
+    poll_resource (cl);
+  }
+}
+
 void der_program (Stub *d) {
-  if (test & GET_DERC) { Stub *cl;
+  if (test & GET_DERC) {
     SE_DERProgram_t *dp = resource_data (d);
     get_dep (d, dp, DefaultDERControl);
-    if (cl = get_list_dep (d, dp, DERControlList)) {
-      cl->poll_rate = active_poll_rate;
-      poll_resource (cl);
-    }
+    get_list_dep (d, dp, DERControlList);
     get_list_dep (d, dp, DERCurveList);
   }
 }
 
-void poll_derpl (Stub *r) {
+void derp_list (Stub *r) {
   SE_DERProgramList_t *derpl = resource_data (r);
-  r->poll_rate = se_exists (derpl, pollRate)? derpl->pollRate : 900;
-  poll_resource (r);
-}
-
-// select the highest priority DERProgram from a DERProgramList
-void der_program_list (Stub *r) {
+  if (test & SUBSCRIBE_TEST && derpl->subscribable)
+    client_subscribe (r);
+  else {
+    r->poll_rate = se_exists (derpl, pollRate)? derpl->pollRate : 900;
+    poll_resource (r);
+  }
+  // select the highest priority DERProgram from a DERProgramList (primary test)
   if (primary && r->reqs) der_program (r->reqs->data);
 }
 
 int fsa (Stub *r) {
   if (test & GET_DERP) {
     SE_FunctionSetAssignments_t *fsa = resource_data (r);
-    Stub *d = get_list_dep (r, fsa, DERProgramList);
-    if (d && primary) { d->completion = der_program_list; return 1; }
+    return get_list_dep (r, fsa, DERProgramList) != NULL;
   } return 0;
 }
 
-// select the highest priority FSA that has a DERProgramList
-void fsa_list (Stub *r) { List *l; 
-  foreach (l, r->reqs) if (fsa (l->data)) break;
+void fsa_list (Stub *r) { List *l;
+  SE_FunctionSetAssignmentsList_t *fsal = resource_data (r);
+  if (test & SUBSCRIBE_TEST && fsal->subscribable)
+    client_subscribe (r);
+  else {
+    r->poll_rate = se_exists (fsal, pollRate)? fsal->pollRate : 900;
+    poll_resource (r);
+  }
+  // select the highest priority FSA that has a DERProgramList (primary test)
+  if (primary) foreach (l, r->reqs) if (fsa (l->data)) break;
 }
 
 void get_edev_subs (Stub *edevs) { List *l;
@@ -315,10 +341,7 @@ void get_edev_subs (Stub *edevs) { List *l;
     if (test & INVERTER_CLIENT && e->sFDI != device_sfdi) continue;
     s->completion = edev_complete;
     get_list_dep (s, e, DERList);
-    if (test & GET_FSA) {
-      if ((s = get_list_dep (s, e, FunctionSetAssignmentsList)) && primary)
-	s->completion = fsa_list;
-    }
+    if (test & GET_FSA) get_list_dep (s, e, FunctionSetAssignmentsList);
   }
 }
 
@@ -337,6 +360,7 @@ void end_device (Stub *r) {
     delete_stub (r); test &= ~DELETE_DEVICE;
   }
   if (e->sFDI == device_sfdi) {
+    client_edev = e;
     test |= CLIENT_FOUND;
     if (device_sfdi == delete_sfdi) return;
     if (test & REGISTER_TEST) {
@@ -386,7 +410,7 @@ void edev_list (Stub *r) { edevs = r;
 void dcap (Stub *r) {
   SE_DeviceCapability_t *dcap = resource_data (r);
   if (test & GET_TIME) {
-    if (!get_root (r->conn, dcap, Time)) 
+    if (!get_root (r->conn, dcap, Time))
       test_fail ("time", "no TimeLink in DeviceCapability");
   }
   if (test & GET_EDEV) {
@@ -459,7 +483,7 @@ void log_event (Stub *log) { List *l;
     case 12: // Time
       switch (le->logEventCode) {
       case 0: // TM_TIME_ADJUSTED
-	printf ("server log event TM_TIME_ADJUSTED\n"); 
+	printf ("server log event TM_TIME_ADJUSTED\n");
       }
     }
   }
@@ -477,8 +501,10 @@ void test_dep (Stub *r) {
   switch (resource_type (r)) {
   case SE_Time: time_sync (r); break;
   case SE_DERProgram: if (!primary) der_program (r); break;
-  case SE_DERProgramList: poll_derpl (r); break;
+  case SE_DERProgramList: derp_list (r); break;
+  case SE_DERControlList: derc_list (r); break;
   case SE_FunctionSetAssignments: if (!primary) fsa (r); break;
+  case SE_FunctionSetAssignmentsList: fsa_list (r); break;
   case SE_DeviceCapability: dcap (r); break;
   case SE_EndDevice: end_device (r); break;
   case SE_Registration: check_registration (r); break;
@@ -501,13 +527,13 @@ int main (int argc, char **argv) {
 	get_resource (service_connect (s, secure), -1, path, 0);
       else get_path (s, secure); break;
     case TCP_ACCEPT:
-      // accept_notifier (any);
+      accept_notifier (any);
     case TCP_PORT:
       if (conn_session (any)) {
 	http_debug (any, 1);
-	// if (http_client (any))
-	process_http (any, test_dep);
-	// else process_notifications (any, test_dep);
+	if (http_client (any))
+	  process_http (any, test_dep);
+	else process_notifications (any, test_dep);
       }
       break;
     case TCP_TIMEOUT:
@@ -522,10 +548,12 @@ int main (int argc, char **argv) {
       print_event_start (any); break;
     case EVENT_END:
       print_event_end (any); break;
-    case DEFAULT_CONTROL:
+    case DEFAULT_START:
+      print_default_control (any); break;
+    case DEFAULT_END:
       print_default_control (any); break;
     case DEVICE_METERING:
       post_readings (any); break;
-    } 
+    }
   }
 }

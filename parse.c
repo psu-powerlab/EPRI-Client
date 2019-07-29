@@ -89,14 +89,14 @@ void parser_rebuffer (Parser *p, void *data, int length);
 #include "string_table.c"
 
 enum ParserState {PARSE_START, PARSE_ELEMENT, PARSE_NEXT, PARSE_ATTRIBUTE,
-		  PARSE_VALUE, PARSE_END, PARSE_SEQUENCE, SEQUENCE_END,
-		  PARSE_INVALID};
+		  PARSE_XSI_TYPE, PARSE_VALUE, PARSE_END, PARSE_SEQUENCE,
+		  SEQUENCE_END, PARSE_INVALID};
 enum ParserError {ERROR_NONE, UNKNOWN_ELEMENT, STACK_OVERFLOW};
 
 #define MAX_STACK 32 // document tree can be 32 levels deep
 
 typedef struct {
-  const SchemaElement *se;
+  const SchemaEntry *se;
   void *base;
   Queue queue;
   int size, count;
@@ -118,11 +118,17 @@ typedef struct _Parser {
   struct _XmlParser *xml;
   ElementStack stack;
   const Schema *schema;
-  const SchemaElement *se;
+  const SchemaEntry *se;
   const struct _ParserDriver *driver;
   void *base; uint8_t *ptr, *end;
   StringTable *global, *local;
-  int state, token, flag, bit;
+  SubstitutionType *st;
+  // parse_uint result
+  union { uint64_t ux; int64_t sx; };
+  int token, n, ux_n;
+  char state, exi_state, flag, bit;
+  unsigned int sign : 1;
+  unsigned int ch : 2;
   unsigned int xml_decl : 1;
   unsigned int need_token : 1;
   unsigned int empty : 1;
@@ -133,7 +139,8 @@ typedef struct _Parser {
 typedef struct _ParserDriver {
   int (*parse_start) (Parser *);
   int (*parse_next) (Parser *);
-  int (*parse_end) (Parser *, const SchemaElement *);
+  int (*parse_xsi_type) (Parser *);
+  int (*parse_end) (Parser *, const SchemaEntry *);
   int (*parse_sequence) (Parser *, StackItem *);
   int (*parse_attr_value) (Parser *, void *);
   int (*parse_value) (Parser *, void *);
@@ -141,15 +148,18 @@ typedef struct _ParserDriver {
   void (*rebuffer) (Parser *, char *, int length);
 } ParserDriver;
 
-StackItem *push_element (ElementStack *stack, const SchemaElement *se,
-			 void *base) { StackItem *t;
+StackItem *push_element (ElementStack *stack, const SchemaEntry *se,
+			 void *base, const Schema *schema) { StackItem *t;
   if (stack->n == MAX_STACK) return NULL;
   stack->n++; t = stack_top (stack);
   memset (t, 0, sizeof (StackItem));
-  t->se = se; t->base = base; return t;
+  t->se = se; t->base = base;
+  t->size = se->st? sizeof (SubstitutionType)
+    : object_size (se->type, schema);
+  return t;
 }
 
-const SchemaElement *pop_element (ElementStack *stack, void **base) {
+const SchemaEntry *pop_element (ElementStack *stack, void **base) {
   StackItem *t = stack_top (stack); stack->n--;
   *base = t->base; return t->se;
 }
@@ -184,44 +194,60 @@ void *add_element (StackItem *t) {
 
 // return parsed object on success NULL otherwise
 void *parse_doc (Parser *p, int *type) {
-  const SchemaElement *se;
+  const SchemaEntry *se, *sub;
   const ParserDriver *d = p->driver;
   ElementStack *stack = &p->stack;
-  StackItem *t; int size;
+  StackItem *t; int size, xsi_type;
   while (1) {
     switch (p->state) {
     case PARSE_START:
       ok (d->parse_start (p));
       stack->n = 0; p->state++;
-      size = object_element_size (p->se, p->schema);
+      size = object_size (p->type, p->schema);
       p->obj = p->base = calloc (1, size); break;
     case PARSE_ELEMENT:
       se = p->se; p->flag = se->bit;
       if (se->attribute) {
-	if (!se->min && !is_pointer (se->xs_type)) {
+	if (!se->min && !is_pointer (se->type)) {
 	  set_count (p->base, 1, p->flag); p->flag++;
 	} p->state = PARSE_ATTRIBUTE; continue;
-      } else if (t = push_element (stack, se, p->base)) {
+      } else if (t = push_element (stack, se, p->base, p->schema)) {
 	p->base += se->offset;
-	t->size = object_element_size (se, p->schema);
 	if (se->unbounded) {
 	  List *l = *(List **)p->base = add_element (t);
 	  p->base = l->data;
 	} else {
 	  t->diff = se->max - se->min;
-	  if (t->diff && !(se->simple && is_pointer (se->xs_type)))
+	  if (t->diff && !is_pointer (se->type))
 	    p->flag += bit_count (t->diff);
 	}
       } else goto parse_error;
     parse_element:
-      if (se->simple) goto parse_value;
-      p->se = &p->schema->elements[se->index+1];
+      if (se->type & ST_SIMPLE) goto parse_value;
+      p->se = &p->schema->entries[se->type+1];
+      if (se->st) {
+	p->st = p->base;
+	p->st->type = se->type;
+	p->state = PARSE_XSI_TYPE;
+	continue;
+      }
       p->state = PARSE_NEXT;
     case PARSE_NEXT:
       ok (d->parse_next (p)); break;
     case PARSE_ATTRIBUTE:
       ok (d->parse_attr_value (p, p->base+p->se->offset));
       p->state--; p->se++; break;
+    case PARSE_XSI_TYPE:
+      ok (xsi_type = d->parse_xsi_type (p));
+      if (xsi_type > 0) {
+	if (!type_is_a (xsi_type, p->st->type, p->schema))
+	  goto parse_error;
+	p->st->type = xsi_type;
+	p->se = &p->schema->entries[xsi_type+1];
+      } else xsi_type = p->se - p->schema->entries - 1; 
+      p->base = p->st->data = calloc (1, object_size (xsi_type, p->schema));
+      p->state = PARSE_NEXT;
+      break;
     parse_value:
       p->state = PARSE_VALUE;
     case PARSE_VALUE:

@@ -13,6 +13,8 @@ void output_init (Output *o, const Schema *schema, char *buffer, int size);
 
 /** @} */
 
+#include <inttypes.h>
+
 #ifndef HEADER_ONLY
 
 int output_char (Output *o, int c) {
@@ -60,7 +62,7 @@ int output_hex (Output *o, uint8_t *value, int n) {
 }
 
 int output_value (Output *o, void *value) {
-  int type = o->se->xs_type;
+  int type = o->se->type ^ ST_SIMPLE;
   int n = type >> 4;
   switch (type & 0xf) {
   case XS_STRING: if (n) return output_escaped (o, value);
@@ -68,11 +70,11 @@ int output_value (Output *o, void *value) {
   case XS_BOOLEAN: return ((*(uint32_t *)value) & (1 << o->flag))?
       output_string (o, "true") : output_string (o, "false");
   case XS_HEX_BINARY: return output_hex (o, value, n);
-  case XS_LONG: return output_string (o, "%lld", *(int64_t *)value);
+  case XS_LONG: return output_string (o, "%" PRId64, *(int64_t *)value);
   case XS_INT: return output_string (o, "%d", *(int32_t *)value);
   case XS_SHORT: return output_string (o, "%d", *(int16_t *)value);
   case XS_BYTE: return output_string (o, "%d",  *(int8_t *)value);
-  case XS_ULONG: return output_string (o, "%llu", *(uint64_t *)value);
+  case XS_ULONG: return output_string (o, "%" PRIu64, *(uint64_t *)value);
   case XS_UINT: return output_string (o, "%u", *(uint32_t *)value);
   case XS_USHORT: return output_string (o, "%u", *(uint16_t *)value);
   case XS_UBYTE: return output_string (o, "%u", *(uint8_t *)value);
@@ -108,7 +110,7 @@ void output_flush (Output *o) {
   o->ptr = o->buffer;
 }
 
-int output_event (Output *o, const SchemaElement *se, int event) {
+int output_event (Output *o, const SchemaEntry *se, int event) {
   const char *name = se_name (se, o->schema);
   if (event & 2 && o->open) {
     if (!output_char (o, '>')) return 0;
@@ -119,7 +121,7 @@ int output_event (Output *o, const SchemaElement *se, int event) {
     if (o->open) {
       if (!output_string (o, "/>")) return 0;
       o->open = 0; o->indent -= 2;
-    } else if (se->simple) {
+    } else if (se->type & ST_SIMPLE) {
       return output_string (o, "</%s>", name);
     } else { o->indent -= 2;
       if (!output_break (o, "</%s>", name)) {
@@ -138,17 +140,24 @@ int output_event (Output *o, const SchemaElement *se, int event) {
   } return 1;
 }
 
+int output_xsi_type (Output *o) {
+  int id = o->schema->ids[o->st->type - o->schema->length];
+  const char *type = o->schema->names[id];
+  return output_string (o, " xsi:type=\"%s\"", type);
+}
+
 void output_done (Output *o) { output_char (o, '\n'); }
 
 const OutputDriver xml_output = {
   output_event,
+  output_xsi_type,
   output_quoted,
   output_value,
   output_done
 };
 
 void output_init (Output *o, const Schema *schema, char *buffer, int size) {
-  memset (o, 0, sizeof (Output));
+  memset (o, 0, sizeof (Output)); o->limit = INT_MAX;
   o->schema = schema; o->ptr = o->buffer = buffer;
   o->end = buffer+size; o->driver = &xml_output;
 }

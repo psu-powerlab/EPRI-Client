@@ -46,15 +46,14 @@ int main (int argc, char **argv) {
   void *any; int index; Service *s;
   platform_init ();
   if (argc < 2) {
-    print_interfaces (1); exit (0);
+    print_interfaces (0); exit (0);
   }
   if ((index = interface_index (argv[1])) < 0) {
     printf ("interface %s not found\n", argv[1]); exit (0); 
   }
-  printf ("index found: %d\n",index);
   client_init (argv[1], "pti_dev.x509"); der_init ();
   load_cert_dir ("certs");
- // discover_device ();
+  discover_device ();
   while (1) {
     switch (der_poll (&any, -1)) {
     case SERVICE_FOUND: s = any;

@@ -44,8 +44,16 @@ int client_poll (void **any, int timeout) {
   } return event;
 }
 
+int store_cred (void *ctx, uint8_t *cert, int length) {
+  uint8_t *lfdi = se_lfdi (ctx);
+  uint64_t *sfdi = se_sfdi (ctx);
+  *sfdi = lfdi_hash (lfdi, cert, length);
+  printf ("store_cred "); print_bytes (lfdi, 20); printf ("\n");
+  return 1;
+}
+
 void client_init (char *name, const char *cert) {
-  if (cert) { tls_init (cert, 0); security_init (cert); }
+  if (cert) { tls_init (cert, store_cred); security_init (cert); }
   discover_init (name);
 }
 

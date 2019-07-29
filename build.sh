@@ -12,7 +12,7 @@
 system="linux" # only linux supported in this version
 linux_host=
 linux_prefix="/usr"
-linux_cross_host=
+linux_cross_host= # arm-linux-gnueabihf
 linux_cross_prefix=
 
 #---------------------------------------------------------
@@ -25,6 +25,8 @@ debug_flags=( -g )
 optimize_flags=( -Os -ffunction-sections -Wl,--gc-sections
 		 -fno-asynchronous-unwind-tables )
 static_flags=( -static -Wl,-Bstatic )
+# cross_flags=( -no-pie -fno-pie )
+build_dir=build
 
 contains () {
     local -n array=$1; local e
@@ -77,11 +79,13 @@ fi
 
 if contains args "static"; then
     compile_args+=( static )
-    flags+=( $static_flags[@] )
+    flags+=( ${static_flags[@]} )
 fi
 
 if contains args "cross"; then
+    build_dir=cross
     compile_args+=( cross )
+    flags+=( ${cross_flags[@]} )
     host=${system}_cross_host
     prefix=${system}_cross_prefix
 else
@@ -116,7 +120,7 @@ compile () {
 	local source=${target}.c
     fi
     local need_compile=0
-    local target_file=build/$target
+    local target_file=$build_dir/$target
     local target_file_dep=${target_file}.dep
     local -n target_flags=${name}_flags
     local -n target_libs=${name}_libs
@@ -151,7 +155,7 @@ linked_objects () {
     local -n objs_in=$1 flags=$2 libs=$3
     local objs_out=()
     for obj in "${objs_in[@]}"; do
-	local target=build/$obj objs=()
+	local target=$build_dir/$obj objs=()
 	compile $obj objs flags libs
 	objs_out+=( $target )
     done
@@ -201,15 +205,15 @@ fi
 
 compile_args="${compile_args[@]}"
 
-if [ ! -d build ]; then mkdir build; fi
+if [ ! -d $build_dir ]; then mkdir $build_dir; fi
 if (( $build_dep == 0 )); then
-   if [ -f build/.args ]; then
-       old_args=`cat build/.args`
+   if [ -f $build_dir/.args ]; then
+       old_args=`cat $build_dir/.args`
    fi
    if [[ $compile_args != $old_args ]]; then
        recompile=1
    fi
-   echo $compile_args > build/.args
+   echo $compile_args > $build_dir/.args
 fi
 sys_flags=( ${flags[@]} )
 #echo ${sys_flags[@]}

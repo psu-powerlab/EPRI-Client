@@ -26,11 +26,6 @@ int signed_int (int64_t *y, char *data) { int sign = 1;
   return unsigned_int ((uint64_t *)y, data)? *y *= sign, 1 : 0;
 }
 
-#define pack_signed(dest, sx, data) \
-  (signed_int (&sx, data)? *dest = sx, 1 : 0)
-#define pack_unsigned(dest, ux, data) \
-  (unsigned_int (&ux, data)? *dest = ux, 1 : 0)
-
 int parse_token (Parser *p) {
   if (!p->need_token) return p->token;
   switch ((p->token = xml_token (p->xml))) {
@@ -53,7 +48,6 @@ int parse_text (Parser *p) {
 
 int parse_hex (uint8_t *value, int n, char *data) {
   int x, m = 0, c, d;
-  //while (c != '\0' && !ws (c)) {
   while (c = hex_digit (d = *data)) {
     if (m == n) return 0; data++;
     x = (d - c) << 4;
@@ -69,20 +63,28 @@ int parse_hex (uint8_t *value, int n, char *data) {
   return 1;
 }
 
+#define pack_signed(dest, sx, data) \
+  (signed_int (&sx, data)? *dest = sx, 1 : 0)
+#define pack_unsigned(dest, ux, data) \
+  (unsigned_int (&ux, data)? *dest = ux, 1 : 0)
+
 int parse_value (Parser *p, void *value) {
   int64_t sx; uint64_t ux;
-  int type = p->se->xs_type; 
+  int type = p->se->type^ST_SIMPLE; 
   char *data = (char *)p->ptr;
   int n = type >> 4;
   switch (type & 0xf) {
-  case XS_STRING: if (n) {
+  case XS_STRING:
+    if (n) {
       if (strlen (data) > n-1) return 0;
       strcpy (value, data);
     } else *(char **)(value) = strdup (data); return 1;
-  case XS_BOOLEAN: if (streq (data, "true") || streq (data, "1"))
+  case XS_BOOLEAN:
+    if (streq (data, "true") || streq (data, "1"))
       *(uint32_t *)value |= 1 << p->flag;
     else if (!(streq (data, "false") || streq (data, "0"))) {
-      p->state = PARSE_INVALID; break; } return 1;
+      p->state = PARSE_INVALID; break;
+    } return 1;
   case XS_HEX_BINARY: return parse_hex (value, n, data);
   case XS_ANY_URI: *(char **)(value) = strdup (data); return 1;
   case XS_LONG: return pack_signed ((int64_t *)value, sx, data);
@@ -96,18 +98,21 @@ int parse_value (Parser *p, void *value) {
   } return 0;
 }
 
+#undef pack_signed
+#undef pack_unsigned
+
 int parse_text_value (Parser *p, void *value) {
   return parse_text (p) && parse_value (p, value);
 }
 
-int start_tag (Parser *p, const SchemaElement *se) {
+int start_tag (Parser *p, const SchemaEntry *se) {
   const char *name = se_name (se, p->schema);
   switch (parse_token (p)) {
   case START_TAG: case EMPTY_TAG:
     if (p->empty) p->state = PARSE_INVALID;
     else if (!streq (name, p->xml->name)) break;
     else { p->empty = p->token; p->need_token = 1;
-      if (p->empty && se->simple) p->state = PARSE_INVALID;
+      if (p->empty && se->type & ST_SIMPLE) p->state = PARSE_INVALID;
       else return 1;
     } break;
   case END_TAG: case XML_INCOMPLETE: break;
@@ -115,7 +120,7 @@ int start_tag (Parser *p, const SchemaElement *se) {
   } return 0;
 }
 
-int end_tag (Parser *p, const SchemaElement *se) {
+int end_tag (Parser *p, const SchemaEntry *se) {
   const char *name = se_name (se, p->schema);
   switch (parse_token (p)) {
   case END_TAG: if (streq (name, p->xml->name)) {
@@ -129,21 +134,39 @@ int compare_names (const void *a, const void *b) {
   return strcmp (*name_a, *name_b);
 }
 
-void *find_se_name (const Schema *schema, char *name) {
-  return bsearch (&name, schema->names, schema->length,
-		  sizeof (char *), compare_names);
+int local_name_index (const Schema *schema, char *name) {
+  const char * const *loc =
+    bsearch (&name, schema->names, schema->count,
+	     sizeof (char *), compare_names);
+  return loc? loc - schema->names : -1;
+}
+
+int element_index (const Schema *schema, char *name) {
+  const char * const *loc =
+    bsearch (&name, schema->elements, schema->length,
+	     sizeof (char *), compare_names);
+  return loc? loc - schema->elements : -1;
+}
+
+int xml_xsi_type (Parser *p) {
+  char *name = attr_value (p->xml->attr, "xsi:type");
+  if (name) { int type, index;
+    if ((index = local_name_index (p->schema, name)) >= 0
+	&& (type = p->schema->types[index]))
+      return type;
+    p->state = PARSE_INVALID; return 0;
+  } return -1;
 }
 
 int xml_start (Parser *p) {
   p->need_token = 1;
-  while (1) { const char * const *name;
+  while (1) { 
     switch (parse_token (p)) {
     case XML_DECL: if (p->xml_decl) goto invalid;
       p->xml_decl = 1; p->need_token = 1; continue;
     case START_TAG: case EMPTY_TAG:
-      if (!(name = find_se_name (p->schema, p->xml->name))) goto invalid;
-      p->type = name - p->schema->names;
-      p->se = &p->schema->elements[p->type];
+      if ((p->type = element_index (p->schema, p->xml->name)) < 0) goto invalid;
+      p->se = &p->schema->entries[p->type];
       p->empty = p->token; p->need_token = !p->empty; 
       return 1;
     case XML_INCOMPLETE: return 0;
@@ -154,7 +177,7 @@ int xml_start (Parser *p) {
 }
 
 int xml_next (Parser *p) {
-  const SchemaElement *se = p->se;
+  const SchemaEntry *se = p->se;
   while (p->state == PARSE_NEXT) {
     if (!se->n) p->state = PARSE_END;
     else if (se->attribute) {
@@ -169,14 +192,14 @@ int xml_next (Parser *p) {
   } p->se = se-1; return 1;
 }
 
-int xml_end (Parser *p, const SchemaElement *se) {
+int xml_end (Parser *p, const SchemaEntry *se) {
   if (p->empty || end_tag (p, se)) {
     p->empty = 0; return 1;
   } return 0;
 }
 
 int xml_sequence (Parser *p, StackItem *t) {
-  const SchemaElement *se = t->se;
+  const SchemaEntry *se = t->se;
   if (start_tag (p, se)) return 1;
   if (p->token <= END_TAG) {
     if (t->count < se->min) p->state = PARSE_INVALID;
@@ -197,7 +220,7 @@ void xml_rebuffer (Parser *p, char *data, int length) {
 }
 
 const ParserDriver xml_parser = {
-  xml_start, xml_next, xml_end, xml_sequence,
+  xml_start, xml_next, xml_xsi_type, xml_end, xml_sequence,
   parse_value, parse_text_value, parse_done, xml_rebuffer
 };
 

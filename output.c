@@ -39,6 +39,8 @@ typedef struct _Output Output;
 */
 int output_item_count (Output *o, int level);
 
+void set_output_limit (Output *o, int limit);
+
 /** @brief Is the output complete?
     @returns 1 if the output is complete, 0 otherwise
 */
@@ -67,18 +69,20 @@ extern Output output_global;
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <limits.h>
 
-enum OutputState {OUTPUT_START, OUTPUT_ELEMENT, OUTPUT_ATTRIBUTE,
-		  OUTPUT_ATTR_VALUE, OUTPUT_SIMPLE, OUTPUT_VALUE, OUTPUT_END,
+enum OutputState {OUTPUT_START, OUTPUT_ELEMENT, OUTPUT_XSI_TYPE,
+		  OUTPUT_ATTRIBUTE, OUTPUT_ATTR_VALUE,
+		  OUTPUT_SIMPLE, OUTPUT_VALUE, OUTPUT_END,
 		  OUTPUT_COMPLEX, OUTPUT_COMPLETE, OUTPUT_ERROR};
 
 struct _OutputDriver;
 
 typedef struct _Output {
-  const Schema *schema; const SchemaElement *se;
+  const Schema *schema; const SchemaEntry *se;
   ElementStack stack;
   char *buffer, *ptr, *end;
-  int state, indent; void *base;
+  int state, indent, limit; void *base;
   /* For the EXI driver keep track of the number of possible event codes and
      the current event code for a given context. The number of possible event
      codes determines the number of bits needed to record an event. With
@@ -89,6 +93,7 @@ typedef struct _Output {
   int bit, flag;
   StringTable *global, *local;
   const struct _OutputDriver *driver;
+  SubstitutionType *st;
   unsigned int open : 1;
   unsigned int first : 1;
 } Output;
@@ -98,7 +103,8 @@ Output output_global;
 enum OutputEvent {EE_EVENT, AT_EVENT, SE_SIMPLE, SE_COMPLEX};
 
 typedef struct _OutputDriver {
-  int (*output_event) (Output *, const SchemaElement *, int);
+  int (*output_event) (Output *, const SchemaEntry *, int);
+  int (*output_xsi_type) (Output *);
   int (*output_attr_value) (Output *, void *);
   int (*output_value) (Output *, void *);
   void (*output_done) (Output *);
@@ -122,8 +128,8 @@ int flag_count (uint32_t *flags, int bit, int min, int max) {
 #define flag_set(flags, bit) (*(uint32_t *)(flags) >> (bit)) & 1
 
 // return the attribute or element count for a schema element
-int output_count (void *base, const SchemaElement *se) {
-  if ((se->attribute || se->simple) && is_pointer (se->xs_type)) {
+int output_count (void *base, const SchemaEntry *se) {
+  if (is_pointer (se->type)) {
     void **value = base + se->offset; int n;
     for (n = 0; n < se->max && *value; n++, value++);
     return n >= se->min? n : 0;
@@ -138,49 +144,56 @@ int output_item_count (Output *o, int level) {
   return o->stack.items[level].count;
 }
 
+void set_output_limit (Output *o, int limit) {
+  o->limit = limit;
+}
+
 int output_complete (Output *o) {
   return o->state == OUTPUT_COMPLETE;
 }
 
 int output_doc (Output *o, void *base, int type) {
   ElementStack *stack = &o->stack; StackItem *t;
-  const SchemaElement *se; int length;
+  const SchemaEntry *se; int length;
   const OutputDriver *d = o->driver; List *q;
   while (1) {
     switch (o->state) {
     case OUTPUT_START:
       if (type >= o->schema->length) return 0;
-      o->se = &o->schema->elements[type];
+      o->se = &o->schema->entries[type];
       o->code = type; o->n = o->schema->length;
       o->base = base; o->state++; o->first = 1;
     case OUTPUT_ELEMENT:
       se = o->se; base = o->base; o->flag = se->bit;
       if (se->attribute) {
-	if (!o->n) o->n = o->se->n;
 	if (output_count (base, se))
 	  o->state = OUTPUT_ATTRIBUTE;
 	else if (se->min) goto error;
-	else goto output_skip;
-      } else if (t = push_element (stack, se, base)) {
-	t->size = object_element_size (se, o->schema);
+	else goto output_next;
+      } else if (t = push_element (stack, se, base, o->schema)) {
 	base += se->offset;
 	if (se->unbounded) {
 	  if (q = *(List **)base)
- 	    t->queue.first = q, o->base = q->data;
+	    t->queue.first = q, o->base = q->data;
 	  else goto element_skip;
 	} else if (t->all = output_count (o->base, se))
 	  o->base = base;
 	else goto element_skip;
       output_element:
-	if (!o->n) o->n = t->count >= se->min? se->n : 1;
-	o->state = se->simple? OUTPUT_SIMPLE : OUTPUT_COMPLEX;
+	o->state = se->type & ST_SIMPLE? OUTPUT_SIMPLE : OUTPUT_COMPLEX;
       } else return 0; break;
     element_skip: if (t->count < se->min) goto error;
-      if (!o->n) o->n = se->n;
     element_next: o->se = pop_element (stack, &o->base);
-    output_skip: o->code++;
-    output_next: o->se++;
-      o->state = o->se->n? OUTPUT_ELEMENT : OUTPUT_END; break;
+    output_next: o->se++; se = o->se;
+      if (o->n) o->code++;
+      else o->n = se->min? 1 : se->n;
+      o->state = se->n? OUTPUT_ELEMENT : OUTPUT_END; break;
+    case OUTPUT_XSI_TYPE:
+      if (d->output_xsi_type (o)) {
+	se = o->se = &o->schema->entries[o->st->type+1];
+	o->n = se->min? 1 : se->n;
+	o->state = OUTPUT_ELEMENT;
+      } else goto full; break;
     case OUTPUT_ATTRIBUTE:
       if (d->output_event (o, o->se, AT_EVENT)) o->state++;
       else goto full;
@@ -199,6 +212,9 @@ int output_doc (Output *o, void *base, int type) {
 	t = stack_top (stack); se = t->se;
 	if (!d->output_event (o, se, EE_EVENT)) goto full;
 	t->count++; // handle element sequences
+	if (t->count == se->max || t->count == o->limit)
+	  goto element_next;
+	o->n = t->count < se->min? 1 : se->n;
 	if (se->unbounded) {
 	  queue_remove (&t->queue);
 	  if (q = queue_peek (&t->queue))
@@ -206,12 +222,7 @@ int output_doc (Output *o, void *base, int type) {
 	  else goto element_skip;
 	} else if (t->count < t->all) {
 	  o->base += t->size;
-	} else {
-	  if (t->count == se->max) {
-	    o->code--; // o->code+1 == 0
-	    goto element_next;
-	  } goto element_skip;
-	}
+	} else goto element_skip;
 	o->flag++; goto output_element;
       } else {
 	if (o->bit) o->ptr++;
@@ -222,7 +233,17 @@ int output_doc (Output *o, void *base, int type) {
       t = stack_top (stack); se = t->se;
       if (d->output_event (o, se, SE_COMPLEX)) {
 	// jump to the element definition
-        o->se = &o->schema->elements[se->index]+1;
+        o->se = &o->schema->entries[se->index+1];
+	o->n = o->se->min? 1 : o->se->n;
+	if (se->st) {
+	  o->st = o->base;
+	  o->base = o->st->data;
+	  if (!o->base) goto error;
+	  if (o->st->type) {
+	    o->state = OUTPUT_XSI_TYPE;
+	    continue;
+	  }
+	}
 	o->state = OUTPUT_ELEMENT;
       } else goto full; break;
     case OUTPUT_COMPLETE:

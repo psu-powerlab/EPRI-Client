@@ -51,7 +51,7 @@ typedef struct _TableEntry {
   struct _TableEntry *next;
   char *name;
   char *type;
-  SchemaElement *se;
+  SchemaEntry *se;
 } TableEntry;
 
 enum TypeKind {AtomicType, ListType, UnionType, ComplexType};
@@ -67,6 +67,7 @@ typedef struct _SchemaType {
   int index;
   unsigned restriction : 1;
   unsigned has_flags : 1;
+  unsigned substitutable : 1;
   List *flags, *pre; void *post;
   int base_bits, bits;
   TableEntry *entries;
@@ -369,22 +370,25 @@ void process_schema (SchemaDoc *doc, Element *root) {
 
 int main () {
   Graph graph; List *sorted;
-  SchemaDoc doc = {0};
+  SchemaDoc doc = {0}; SchemaType *t;
   Named *se_list = load_list ("se_list.txt"); 
   Element *root = xml_read ("sep.xsd");
   process_schema (&doc, root);
+  // make Resource a substitutable type (using the xsi:type attribute)
+  t = find_by_name (doc.types, "Resource");
+  t->substitutable = 1;
   build_graph (&graph, doc.types);
   sorted = top_sort (&graph);
   compute_flags (sorted, doc.types);
+  file = fopen ("se_schema.c", "wb+");
+  print_schema (sorted, &doc); fclose (file);
   file = fopen ("se_types.h", "wb+");
   print_types (sorted, doc.types);
-  print_symbols (doc.elements);
+  print_symbols (&doc);
   fclose (file);
   file = fopen ("se_types_doc.h", "wb+");
   print_types_doc (sorted, doc.types);
   fclose (file);
-  file = fopen ("se_schema.c", "wb+");
-  print_schema (sorted, &doc); fclose (file);
   file = fopen ("se_list.c", "wb+");  
   print_list_info (se_list, doc.types); fclose (file);
   // java_gen (&doc);

@@ -119,6 +119,12 @@ Stub *get_resource (void *conn, int type, const char *href, int count);
 #define get_list_dep(r, obj, type)				\
   new_dep (r, get_list_root ((r)->conn, obj, type), SE_##type##Link_exists)
 
+Stub *put_resource (void *conn, void *data, int type, const char *href);
+
+#define put_root(conn, obj, data, type)					\
+  ((data) && se_exists (obj, type##Link)?				\
+   put_resource (conn, data, SE_##type, (obj)->type##Link.href) : NULL)
+
 /** @brief Dependency function */
 typedef void (*DepFunc) (Stub *s);
 
@@ -134,6 +140,15 @@ typedef void (*DepFunc) (Stub *s);
 int process_http (void *conn, DepFunc dep);
 
 /** @} */
+
+int is_subscribed (Stub *s) { List *l; Stub *t;
+  if (s->subscribed) return 1;
+  foreach (l, s->deps) { t = l->data;
+    if (se_list (resource_type (t))) {
+      if (t->subscribed) return 1;
+    } else break;
+  } return 0;
+}
 
 void get_seq (Stub *s, int offset, int count) {
   char *name = resource_name (s);
@@ -279,14 +294,24 @@ void *get_subordinate (Stub *s, int type) { List *l;
   } return NULL;
 }
 
-Stub *get_resource (void *conn, int type, const char *href, int count) {
-  Stub *s; Uri128 buf; Uri *uri = &buf.uri;
+Stub *alloc_resource (void *conn, int type, const char *href) {
+  Uri128 buf; Uri *uri = &buf.uri;
   if (!http_parse_uri (&buf, conn, href, 127)) return NULL;
   if (uri->host) conn = se_connect_uri (uri);
-  s = get_stub (uri->path, type, conn);
-  if ((time (NULL) - s->base.time) > s->poll_rate) {
+  return get_stub (uri->path, type, conn);
+}
+
+Stub *get_resource (void *conn, int type, const char *href, int count) {
+  Stub *s = alloc_resource (conn, type, href);
+  if (s && (time (NULL) - s->base.time) > s->poll_rate) {
     s->all = count; update_resource (s);
   } return s;
+}
+
+Stub *put_resource (void *conn, void *data, int type, const char *href) {
+  Stub *s = alloc_resource (conn, type, href);
+  if (s) se_put (conn, data, type, href);
+  return s;
 }
 
 void poll_resource (Stub *s) {
@@ -324,6 +349,7 @@ void update_existing (Stub *s, void *obj, DepFunc dep) {
     memcpy (&ex->EventStatus, &ev->EventStatus,
 	    sizeof (SE_EventStatus_t));
     free_se_object (obj, r->type);
+    s->complete = 0;
   } else replace_se_object (r->data, obj, r->type);
   dep (s);
   if (!s->flags) dep_complete (s);
@@ -401,13 +427,19 @@ void process_response (void *conn, int status, DepFunc dep) {
       } else free_se_object (obj, type);
     } break;
   case HTTP_POST:
+    if (s = http_context (conn)) s->subscribed = 1;
     if (s = find_target (conn)) {
-      if (s->base.info) {
-	char *location = http_location (conn);
-	int type = s->base.info->type;
-	add_dep (s, get_resource (conn, type, location, 0));
+      if (s->base.info) { char *location;
+	if (location = http_location (conn)) {
+	  int type = s->base.info->type;
+	  add_dep (s, get_resource (conn, type, location, 0));
+	}
       }
     } break;
+  case HTTP_PUT:
+    if ((s = find_target (conn)) && !resource_data (s))
+      update_resource (s);
+    break;
   case HTTP_DELETE: remove_stub (http_context (conn)); break;
   }
 }

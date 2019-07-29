@@ -92,6 +92,11 @@ void hash_erase (HashPointer *p);
 
 #ifndef HEADER_ONLY
 
+#include <string.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <stdio.h>
+
 /* sparsehash implementation inspired by the google sparsehash concept
    https://github.com/sparsehash/sparsehash */
 
@@ -102,22 +107,23 @@ typedef struct {
   uint64_t bits; // count (6) / bitmap (58)
 } SparseGroup;
 
+// https://en.wikipedia.org/wiki/Hamming_weight
+int popcount64 (uint64_t x) {
+  const uint64_t m1  = 0x5555555555555555; // binary: 0101...
+  const uint64_t m2  = 0x3333333333333333; // binary: 00110011..
+  const uint64_t m4  = 0x0f0f0f0f0f0f0f0f; // binary:  4 zeros,  4 ones ...
+  const uint64_t h01 = 0x0101010101010101; // the sum of 256 to the power of
+                                           // 0,1,2,3...
+  x -= (x >> 1) & m1;             // put count of each 2 bits into those 2 bits
+  x = (x & m2) + ((x >> 2) & m2); // put count of each 4 bits into those 4 bits 
+  x = (x + (x >> 4)) & m4;        // put count of each 8 bits into those 8 bits 
+  return (x * h01) >> 56;  // returns left 8 bits of x + (x<<8) + (x<<16)
+                           //                          + (x<<24) + ... 
+}
+
 // count the bits up to bit position i
-// https://graphics.stanford.edu/~seander/bithacks.html
 int bit_rank (uint64_t bits, int i) {
-  if (i == 0) return 0;
-  // Shift out bits after given position.
-  uint64_t r = bits << (64 - i);
-  // Count set bits in parallel.
-  // r = (r & 0x5555...) + ((r >> 1) & 0x5555...);
-  r = r - ((r >> 1) & ~0UL/3);
-  // r = (r & 0x3333...) + ((r >> 2) & 0x3333...);
-  r = (r & ~0UL/5) + ((r >> 2) & ~0UL/5);
-  // r = (r & 0x0f0f...) + ((r >> 4) & 0x0f0f...);
-  r = (r + (r >> 4)) & ~0UL/17;
-  // r = r % 255;
-  r = (r * (~0UL/255)) >> 56;
-  return (int)r;
+  return i? popcount64 (bits << (64 - i)) : 0;
 }
 
 // insert data into sparesgroup g at position i
@@ -202,7 +208,8 @@ void **hash_find (HashTable *ht, void *key) {
 
 void hash_init (HashTable *ht, int size) {
   int groups = (size + 57) / 58;
-  ht->size = size; ht->min = (size * 40) / 100;
+  ht->size = size; ht->items = 0;
+  ht->min = (size * 40) / 100;
   ht->max = (size * 80) / 100;
   ht->table = calloc (1, sizeof (SparseGroup) * groups);
   ht->last = ht->table + (groups - 1);
@@ -215,23 +222,24 @@ HashTable *hash_new (int size) {
   return ht;
 }
 
-void hash_free (HashTable *ht) {
+void free_table (HashTable *ht) {
   SparseGroup *g = ht->table;
   do {
     if (g->slot) free (g->slot); g++;
-  } while (g < ht->last);
-  free (ht->table); free (ht);
+  } while (g <= ht->last);
+  free (ht->table);
 }
 
-HashTable *hash_resize (HashTable *ht, int size) {
-  HashTable *gt = hash_new (size);
-  HashPointer p; void *data;
-  gt->get_key = ht->get_key;
-  gt->hash = ht->hash;
-  gt->compare = ht->compare;
-  gt->items = ht->items;
-  foreach_h (data, &p, ht) hash_insert (gt, data);
-  hash_free (ht); return gt;
+void hash_free (HashTable *ht) {
+  free_table (ht); free (ht);
+}
+
+void hash_resize (HashTable *ht, int size) {
+  HashTable gt; HashPointer p; void *data;
+  memcpy (&gt, ht, sizeof (HashTable));
+  hash_init (ht, size);
+  foreach_h (data, &p, &gt) hash_put (ht, data);
+  free_table (&gt);
 }
 
 void hash_put (HashTable *ht, void *data) {
@@ -239,7 +247,7 @@ void hash_put (HashTable *ht, void *data) {
   if (e = hash_find (ht, key)) *e = data;
   else {
     if (ht->items == ht->max)
-      ht = hash_resize (ht, ht->size << 1);
+      hash_resize (ht, ht->size << 1);
     hash_insert (ht, data);
     ht->items++;
   }
@@ -250,7 +258,7 @@ void *hash_delete (HashTable *ht, void *key) {
   if (e = hash_find (ht, key)) {
     tmp = *e; *e = NULL;
     if (ht->items == ht->min)
-      ht = hash_resize (ht, ht->size >> 1);
+      hash_resize (ht, ht->size >> 1);
     ht->items--;
   } return tmp;
 }

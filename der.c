@@ -9,9 +9,17 @@
 
 #define DEVICE_SCHEDULE (EVENT_NEW+11)
 #define DEVICE_METERING (EVENT_NEW+12)
-#define DEFAULT_CONTROL (EVENT_NEW+13)
+#define DEFAULT_START (EVENT_NEW+13)
+#define DEFAULT_END (EVENT_NEW+14)
 
 #include "settings.c"
+
+typedef struct _DefaultControl {
+  struct _DefaultControl *next;
+  SE_DefaultDERControl_t *dderc;
+  void *context;
+  uint32_t active;
+} DefaultControl;
 
 /** A DerDevice is a representation of a DER EndDevice. */
 typedef struct {
@@ -20,9 +28,10 @@ typedef struct {
   int metering_rate; ///< is the post rate for meter readings
   Stub *mup; ///< is a pointer to the MirrorUsagePoint for this EndDevice
   List *readings; ///< is a list of MirrorMeterReadings
-  List *derpl; ///< is a list of DER programs 
-  SE_DERControlBase_t base; 
-  SE_DefaultDERControl_t *dderc; ///< is the default DER control
+  List *derpl; ///< is a list of DER programs
+  DefaultControl *defaults; ///< is a list of active default DER controls
+  uint32_t active; ///< bitmask of active controls
+  // SE_DERControlBase_t base; 
   Schedule schedule; ///< is the DER schedule for this device
   Settings settings; ///< is the DER device settings
 } DerDevice;
@@ -107,17 +116,25 @@ void copy_der_base (SE_DERControlBase_t *a,
   b->_flags &= mask; a->_flags |= mask;
   copy_boolean (a, b, opModConnect);
   copy_boolean (a, b, opModEnergize);
-  copy_field (a, b, opModFixedPF);
+  copy_field (a, b, opModFixedPFAbsorbW);
+  copy_field (a, b, opModFixedPFInjectW);
   copy_field (a, b, opModFixedVar);
   copy_field (a, b, opModFixedW);
   copy_field (a, b, opModFreqDroop);
   copy_field (a, b, opModFreqWatt);
+  copy_field (a, b, opModHFRTMayTrip);
   copy_field (a, b, opModHFRTMustTrip);
+  copy_field (a, b, opModHVRTMayTrip);
   copy_field (a, b, opModHVRTMomentaryCessation);
   copy_field (a, b, opModHVRTMustTrip);
+  copy_field (a, b, opModLFRTMayTrip);
   copy_field (a, b, opModLFRTMustTrip);
+  copy_field (a, b, opModLVRTMayTrip);
   copy_field (a, b, opModLVRTMomentaryCessation);
   copy_field (a, b, opModLVRTMustTrip);
+  copy_field (a, b, opModMaxLimW);
+  copy_field (a, b, opModTargetVar);
+  copy_field (a, b, opModTargetW);
   copy_field (a, b, opModVoltVar);
   copy_field (a, b, opModVoltWatt);
   copy_field (a, b, opModWattPF);
@@ -125,6 +142,7 @@ void copy_der_base (SE_DERControlBase_t *a,
   copy_field (a, b, rampTms);
   b->_flags = flags;
 }
+
 /*
 void update_der (EventBlock *eb, int event) {
   Device *d = eb->info; int flags;
@@ -140,6 +158,38 @@ void update_der (EventBlock *eb, int event) {
   }
 }
 */
+
+DefaultControl *
+insert_default (DefaultControl *d, SE_DefaultDERControl_t *dderc,
+		void *context, uint32_t active) {
+  DefaultControl *n = type_alloc (DefaultControl);
+  n->next = d; n->dderc = dderc; n->context = context; n->active = active;
+  return n;
+}
+
+void update_defaults (Schedule *s) {
+  DerDevice *d = s->context; Stub *t;
+  EventBlock *eb; uint32_t mask = 0;
+  List *l = d->derpl;
+  DefaultControl *m = NULL, *n;
+  foreach (eb, s->active) mask |= eb->der;
+  d->active = mask; mask = ~mask;
+  while (l && mask) {
+    if (t = get_subordinate (l->data, SE_DefaultDERControl)) {
+      SE_DefaultDERControl_t *dderc = resource_data (t);
+      uint32_t flags = se_flags (&dderc->DERControlBase);
+      uint32_t active = flags & mask;
+      if (active) { mask &= ~flags;
+	m = insert_default (m, dderc, d, active);
+	if (!find_by_data ((List *)d->defaults, dderc))
+	  insert_event (m, DEFAULT_START, 0);
+      }
+    } l = l->next;
+  }
+  n = list_subtract (d->defaults, m);
+  foreach (l, n) insert_event (l, DEFAULT_END, 0);
+  free_list (n); d->defaults = list_reverse (m);
+}
 
 void remove_programs (Schedule *s, List *derpl) {
   EventBlock *eb; HashPointer p;
@@ -160,7 +210,6 @@ void schedule_der (Stub *edev) {
   Schedule *schedule = &device->schedule;
   Stub *fsa = NULL, *s, *t;
   List *l, *m, *derpl = NULL;
-  SE_DefaultDERControl_t *dderc = NULL;
   printf ("schedule_der\n");
   if (!(fsa = get_subordinate (edev, SE_FunctionSetAssignmentsList))) return;
   // add the lFDI if not provided by the server
@@ -186,11 +235,8 @@ void schedule_der (Stub *edev) {
 	eb = schedule_event (schedule, m->data, derp->primacy);
 	eb->program = s; eb->context = device;
       }
-    if (!dderc && (t = get_subordinate (s, SE_DefaultDERControl)))
-      dderc = resource_data (t);
   }
   device->derpl = derpl;
-  device->dderc = dderc;
   insert_event (schedule, SCHEDULE_UPDATE, 0);
   // update_schedule (schedule);
   insert_event (device, DEVICE_SCHEDULE, 0);
